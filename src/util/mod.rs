@@ -13,6 +13,7 @@ pub mod elf;
 pub mod file;
 pub mod lcf;
 pub mod map;
+pub mod matt;
 pub mod ncompress;
 pub mod nested;
 pub mod rarc;
@@ -25,7 +26,9 @@ pub mod take_seek;
 pub mod u8_arc;
 
 #[inline]
-pub const fn align_up(value: u32, align: u32) -> u32 { (value + (align - 1)) & !(align - 1) }
+pub const fn align_up(value: u32, align: u32) -> u32 {
+    (value + (align - 1)) & !(align - 1)
+}
 
 /// Creates a fixed-size array reference from a slice.
 #[macro_export]
@@ -60,13 +63,15 @@ macro_rules! static_assert {
 }
 
 pub trait IntoCow<'a, B>
-where B: ToOwned + ?Sized
+where
+    B: ToOwned + ?Sized,
 {
     fn into_cow(self) -> Cow<'a, B>;
 }
 
 pub trait ToCow<'a, B>
-where B: ToOwned + ?Sized
+where
+    B: ToOwned + ?Sized,
 {
     fn to_cow(&'a self) -> Cow<'a, B>;
 }
@@ -76,13 +81,18 @@ where
     O: Deref + Clone + 'a,
     <O as Deref>::Target: ToOwned<Owned = O>,
 {
-    fn into_cow(self) -> Cow<'a, <O as Deref>::Target> { Cow::Owned(self) }
+    fn into_cow(self) -> Cow<'a, <O as Deref>::Target> {
+        Cow::Owned(self)
+    }
 }
 
 impl<'a, B> ToCow<'a, B> for B
-where B: ToOwned + ?Sized
+where
+    B: ToOwned + ?Sized,
 {
-    fn to_cow(&'a self) -> Cow<'a, B> { Cow::Borrowed(self) }
+    fn to_cow(&'a self) -> Cow<'a, B> {
+        Cow::Borrowed(self)
+    }
 }
 
 pub enum Bytes<'a> {

@@ -55,6 +55,10 @@ pub struct DumpArgs {
     /// Attempt to reconstruct tags that have been removed by the linker, e.g.
     /// tags from unused functions or functions that have been inlined away.
     include_erased: bool,
+    /// Avoid inheritance and recursively define struct members for each inherited type.
+    /// Useful for generating Ghidra compatible C style headers to import data types
+    #[argp(switch)]
+    c_style: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {

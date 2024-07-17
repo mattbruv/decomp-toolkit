@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cmp::max,
     collections::BTreeMap,
     fmt::{Display, Formatter, Write},
@@ -8,12 +9,15 @@ use std::{
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use indent::indent_all_by;
+use itertools::Itertools;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 
 use crate::{
     array_ref,
     util::reader::{Endian, FromBytes, FromReader},
 };
+
+use super::matt::{get_struct_from_base, get_structs_recursive};
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
@@ -477,7 +481,9 @@ impl Tag {
 }
 
 pub fn read_debug_section<R>(reader: &mut R, e: Endian, include_erased: bool) -> Result<DwarfInfo>
-where R: BufRead + Seek + ?Sized {
+where
+    R: BufRead + Seek + ?Sized,
+{
     let len = {
         let old_pos = reader.stream_position()?;
         let len = reader.seek(SeekFrom::End(0))?;
@@ -501,7 +507,9 @@ where R: BufRead + Seek + ?Sized {
 
 #[allow(unused)]
 pub fn read_aranges_section<R>(reader: &mut R, e: Endian) -> Result<()>
-where R: BufRead + Seek + ?Sized {
+where
+    R: BufRead + Seek + ?Sized,
+{
     let len = {
         let old_pos = reader.stream_position()?;
         let len = reader.seek(SeekFrom::End(0))?;
@@ -622,7 +630,9 @@ where
 
 // TODO Shift-JIS?
 fn read_string<R>(reader: &mut R) -> Result<String>
-where R: BufRead + ?Sized {
+where
+    R: BufRead + ?Sized,
+{
     let mut str = String::new();
     let mut buf = [0u8; 1];
     loop {
@@ -635,11 +645,7 @@ where R: BufRead + ?Sized {
     Ok(str)
 }
 
-fn read_attribute<R>(
-    reader: &mut R,
-    data_endian: Endian,
-    addr_endian: Endian,
-) -> Result<Attribute>
+fn read_attribute<R>(reader: &mut R, data_endian: Endian, addr_endian: Endian) -> Result<Attribute>
 where
     R: BufRead + Seek + ?Sized,
 {
@@ -1332,139 +1338,6 @@ pub fn subroutine_def_string(
     is_erased: bool,
 ) -> Result<String> {
     let mut out = String::new();
-    if is_erased {
-        out.push_str("// Erased\n");
-    } else if let (Some(start), Some(end)) = (t.start_address, t.end_address) {
-        writeln!(out, "// Range: {:#X} -> {:#X}", start, end)?;
-    }
-    let rt = type_string(info, typedefs, &t.return_type, true)?;
-    if t.local {
-        out.push_str("static ");
-    }
-    if t.inline {
-        out.push_str("inline ");
-    }
-    if t.virtual_ {
-        out.push_str("virtual ");
-    }
-    out.push_str(&rt.prefix);
-    out.push(' ');
-
-    let mut name_written = false;
-    if let Some(member_of) = t.member_of {
-        let tag = info
-            .tags
-            .get(&member_of)
-            .ok_or_else(|| anyhow!("Failed to locate member_of tag {}", member_of))?;
-        let base_name = tag
-            .string_attribute(AttributeKind::Name)
-            .ok_or_else(|| anyhow!("member_of tag {} has no name attribute", member_of))?;
-        write!(out, "{}::", base_name)?;
-
-        // Handle constructors and destructors
-        if let Some(name) = t.name.as_ref() {
-            if name == "__dt" {
-                write!(out, "~{}", base_name)?;
-                name_written = true;
-            } else if name == "__ct" {
-                write!(out, "{}", base_name)?;
-                name_written = true;
-            }
-        }
-    }
-    if !name_written {
-        if let Some(name) = t.name.as_ref() {
-            out.push_str(name);
-        }
-    }
-    let mut parameters = String::new();
-    if t.parameters.is_empty() {
-        if t.var_args {
-            parameters = "...".to_string();
-        } else if t.prototyped {
-            parameters = "void".to_string();
-        }
-    } else {
-        for (idx, parameter) in t.parameters.iter().enumerate() {
-            if idx > 0 {
-                write!(parameters, ", ")?;
-            }
-            let ts = type_string(info, typedefs, &parameter.kind, true)?;
-            if let Some(name) = &parameter.name {
-                write!(parameters, "{} {}{}", ts.prefix, name, ts.suffix)?;
-            } else {
-                write!(parameters, "{}{}", ts.prefix, ts.suffix)?;
-            }
-            if let Some(location) = &parameter.location {
-                write!(parameters, " /* {} */", location)?;
-            }
-        }
-        if t.var_args {
-            write!(parameters, ", ...")?;
-        }
-    }
-    write!(out, "({}){} {{", parameters, rt.suffix)?;
-
-    if !t.variables.is_empty() {
-        writeln!(out, "\n    // Local variables")?;
-        let mut var_out = String::new();
-        for variable in &t.variables {
-            let ts = type_string(info, typedefs, &variable.kind, true)?;
-            write!(
-                var_out,
-                "{} {}{};",
-                ts.prefix,
-                variable.name.as_deref().unwrap_or_default(),
-                ts.suffix
-            )?;
-            if let Some(location) = &variable.location {
-                write!(var_out, " // {}", location)?;
-            }
-            writeln!(var_out)?;
-        }
-        write!(out, "{}", indent_all_by(4, var_out))?;
-    }
-
-    if !t.references.is_empty() {
-        writeln!(out, "\n    // References")?;
-        for &reference in &t.references {
-            let tag = info
-                .tags
-                .get(&reference)
-                .ok_or_else(|| anyhow!("Failed to locate reference tag {}", reference))?;
-            if tag.kind == TagKind::Padding {
-                writeln!(out, "    // -> ??? ({})", reference)?;
-                continue;
-            }
-            let variable = process_variable_tag(info, tag)?;
-            writeln!(out, "    // -> {}", variable_string(info, typedefs, &variable, false)?)?;
-        }
-    }
-
-    if !t.labels.is_empty() {
-        writeln!(out, "\n    // Labels")?;
-        for label in &t.labels {
-            writeln!(out, "    {}: // {:#X}", label.name, label.address)?;
-        }
-    }
-
-    if !t.blocks.is_empty() {
-        writeln!(out, "\n    // Blocks")?;
-        for block in &t.blocks {
-            let block_str = subroutine_block_string(info, typedefs, block)?;
-            out.push_str(&indent_all_by(4, block_str));
-        }
-    }
-
-    if !t.inlines.is_empty() {
-        writeln!(out, "\n    // Inlines")?;
-        for inline in &t.inlines {
-            let inline_str = subroutine_def_string(info, typedefs, inline, is_erased)?;
-            out.push_str(&indent_all_by(4, inline_str));
-        }
-    }
-
-    writeln!(out, "}}")?;
     Ok(out)
 }
 
@@ -1639,6 +1512,7 @@ pub fn struct_def_string(
         }
     }
     let mut wrote_base = false;
+    /*
     for base in &t.bases {
         if !wrote_base {
             out.push_str(" : ");
@@ -1661,6 +1535,7 @@ pub fn struct_def_string(
             out.push_str(&type_name(info, typedefs, &base.base_type)?);
         }
     }
+    */
     out.push_str(" {\n");
     if let Some(byte_size) = t.byte_size {
         writeln!(out, "    // total size: {:#X}", byte_size)?;
@@ -1669,12 +1544,21 @@ pub fn struct_def_string(
         StructureKind::Struct => Visibility::Public,
         StructureKind::Class => Visibility::Private,
     };
+
+    let mut all_structs: Vec<StructureType> = get_structs_recursive(info, t.clone());
+    all_structs.reverse();
+
+    let all_members = all_structs
+        .iter() //
+        .flat_map(|x| x.members.clone())
+        .collect_vec();
+
     let mut indent = 4;
-    let unions = get_anon_unions(info, &t.members)?;
-    let groups = get_anon_union_groups(&t.members, &unions);
+    let unions: Vec<AnonUnion> = vec![]; // get_anon_unions(info, &all_members)?;
+    let groups: Vec<AnonUnionGroup> = vec![]; // get_anon_union_groups(&all_members, &unions);
     let mut in_union = 0;
     let mut in_group = 0;
-    for (i, member) in t.members.iter().enumerate() {
+    for (i, member) in all_members.iter().enumerate() {
         if vis != member.visibility {
             vis = member.visibility;
             match member.visibility {
@@ -1952,7 +1836,7 @@ fn process_structure_member_tag(info: &DwarfInfo, tag: &Tag) -> Result<Structure
     Ok(StructureMember { name, kind, offset, bit, visibility, byte_size })
 }
 
-fn process_structure_tag(info: &DwarfInfo, tag: &Tag) -> Result<StructureType> {
+pub fn process_structure_tag(info: &DwarfInfo, tag: &Tag) -> Result<StructureType> {
     ensure!(
         matches!(tag.kind, TagKind::StructureType | TagKind::ClassType),
         "{:?} is not a Structure type tag",
@@ -1977,9 +1861,15 @@ fn process_structure_tag(info: &DwarfInfo, tag: &Tag) -> Result<StructureType> {
 
     let mut members = Vec::new();
     let mut bases = Vec::new();
+    let mut base_structs: Vec<StructureType> = Vec::new();
+
+    let mut base_structs: Vec<StructureType> = vec![];
     for child in tag.children(&info.tags) {
         match child.kind {
-            TagKind::Inheritance => bases.push(process_inheritance_tag(info, child)?),
+            TagKind::Inheritance => {
+                let base = process_inheritance_tag(info, child)?;
+                bases.push(base);
+            }
             TagKind::Member => members.push(process_structure_member_tag(info, child)?),
             TagKind::Typedef => {
                 // TODO?
